@@ -1,0 +1,32 @@
+-- ============================================================================
+-- TEST IT NOW
+-- ============================================================================
+CALL PROCESS_CONTRACTS_PYTHON();
+-- Check results
+SELECT * FROM AUTOMATION_TESTING_FINAL;
+
+
+
+-- Check task status
+SHOW TASKS LIKE 'AUTO_CONTRACT_TASK';
+-- Check recent runs
+SELECT
+   NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME, RETURN_VALUE
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+   SCHEDULED_TIME_RANGE_START => DATEADD('minute', -10, CURRENT_TIMESTAMP())
+))
+WHERE NAME = 'AUTO_CONTRACT_TASK'
+ORDER BY SCHEDULED_TIME DESC
+LIMIT 5;
+
+SELECT * FROM AUTOMATION_TESTING_FINAL ORDER BY file_name DESC;
+
+
+-- Stop automation
+ALTER TASK AUTO_CONTRACT_TASK SUSPEND;
+-- When you upload files, start it
+ALTER TASK AUTO_CONTRACT_TASK RESUME;
+-- After files are processed (check results), stop again
+ALTER TASK AUTO_CONTRACT_TASK SUSPEND;
+
+SHOW TASKS LIKE 'AUTO_CONTRACT_TASK';
