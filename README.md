@@ -2,6 +2,7 @@
 
 This repository contains the complete implementation of an automated contract-processing pipeline built using Snowflake Document AI, Snowpark Python, and Snowflake Tasks. The goal of this project is to extract structured contract information—such as contractor name, signing date, RFP number, amounts, and task details—from large PDF documents efficiently and accurately. The system automatically detects large files, splits PDFs into chunks, processes them using Document AI, and stores the final extracted results in a unified Snowflake table.
 
+
 🎯 Project Objectives
 
 Automate the ingestion and processing of contract PDF files.
@@ -11,12 +12,14 @@ Consolidate extraction outputs into a clean, final table.
 Enable continuous automated processing using Snowflake Tasks.
 Improve accuracy and reliability of contract metadata extraction.
 
+
 📚 Data Sources
 
 The project processes contract PDF files stored in Snowflake stages:
 AUTOMATION_TESTING_SOURCE → Raw contract PDFs uploaded by the client.
 AUTOMATION_TESTING_PROCESSED → Preprocessed or split PDFs used for Document AI.
 Document AI model: DAEN_DATA_EQUITY (custom-trained model).
+
 
 🧠 Key Methodologies & Technologies
 
@@ -31,6 +34,7 @@ Schedules the automation to run every minute.
 
 Table Reconstruction Logic
 Combines chunk-level predictions into final contract-level results.
+
 
 ⚙️ Setup Instructions
 
@@ -56,6 +60,7 @@ ALTER TASK AUTO_CONTRACT_TASK RESUME;
 
 SELECT * FROM AUTOMATION_TESTING_FINAL;
 
+
 🚀 How the Automation Works
 
 The Snowpark Python procedure scans the source stage.
@@ -73,6 +78,7 @@ Extraction outputs are merged and cleaned.
 Final results are stored in AUTOMATION_TESTING_FINAL.
 
 A Snowflake Task runs this automatically every minute.
+
 
 📌Future Enhancements
 
