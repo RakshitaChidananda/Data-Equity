@@ -1,0 +1,15 @@
+-- ============================================================================
+-- RECREATE TASK WITH NEW PROCEDURE
+-- ============================================================================
+-- Stop and drop old task
+ALTER TASK IF EXISTS AUTO_CONTRACT_TASK SUSPEND;
+DROP TASK IF EXISTS AUTO_CONTRACT_TASK;
+-- Create new task with Python procedure
+CREATE OR REPLACE TASK AUTO_CONTRACT_TASK
+   WAREHOUSE = DOC_AI_WH
+   SCHEDULE = '1 MINUTE'
+   COMMENT = 'Python-based contract processing'
+AS
+   CALL PROCESS_CONTRACTS_PYTHON();
+-- Start it
+ALTER TASK AUTO_CONTRACT_TASK RESUME;
