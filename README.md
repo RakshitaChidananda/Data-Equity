@@ -74,7 +74,7 @@ Final results are stored in AUTOMATION_TESTING_FINAL.
 
 A Snowflake Task runs this automatically every minute.
 
-Future Enhancements
+📌Future Enhancements
 
 Improve extraction of low-accuracy fields (e.g., TASK, MAXIMUM_AMOUNT).
 
