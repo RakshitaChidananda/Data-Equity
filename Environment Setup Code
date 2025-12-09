@@ -1,0 +1,172 @@
+USE DATABASE DOC_AI_DB;
+USE SCHEMA DOC_AI_SCHEMA;
+USE ROLE ACCOUNTADMIN;
+
+CREATE OR REPLACE PROCEDURE PROCESS_CONTRACTS_PYTHON()
+RETURNS VARCHAR
+LANGUAGE PYTHON
+RUNTIME_VERSION = '3.11'
+PACKAGES = ('snowflake-snowpark-python', 'pypdf')
+HANDLER = 'main'
+AS
+$$
+import os
+import tempfile
+from pathlib import Path
+import pypdf
+def main(session):
+   # Configuration
+   source_stage = "DOC_AI_DB.DOC_AI_SCHEMA.AUTOMATION_TESTING_SOURCE"
+   processed_stage = "DOC_AI_DB.DOC_AI_SCHEMA.AUTOMATION_TESTING_PROCESSED"
+   max_pages = 120
+   # Get list of files already processed
+   already_processed = set()
+   try:
+       df = session.sql("SELECT DISTINCT SPLIT_PART(file_name, '/', -1) AS base FROM AUTOMATION_TESTING_RAW").collect()
+       for row in df:
+           # Remove __partNNN.pdf suffix if present
+           fname = row['BASE']
+           if '__part' in fname:
+               fname = fname.split('__part')[0] + '.pdf'
+           already_processed.add(fname)
+   except:
+       pass  # Table might be empty
+   # Get files in source stage
+   source_files = session.sql(f"SELECT RELATIVE_PATH FROM DIRECTORY('@{source_stage}') WHERE LOWER(RELATIVE_PATH) LIKE '%.pdf'").collect()
+   files_processed = 0
+   tmp_dir = tempfile.mkdtemp()
+   for row in source_files:
+       src_path = row['RELATIVE_PATH']
+       filename = src_path.split('/')[-1]
+       # Skip if already processed
+       if filename in already_processed:
+           continue
+       try:
+           # Download file
+           local_file = os.path.join(tmp_dir, filename)
+           session.file.get(f"@{source_stage}/{src_path}", tmp_dir)
+           # Try to read PDF
+           try:
+               reader = pypdf.PdfReader(local_file)
+               page_count = len(reader.pages)
+               if page_count <= max_pages:
+                   # Small PDF: just copy
+                   session.file.put(local_file, f"@{processed_stage}", auto_compress=False, overwrite=True)
+               else:
+                   # Large PDF: split into chunks
+                   base_name = filename.replace('.pdf', '')
+                   chunk_num = 0
+                   for start_page in range(0, page_count, max_pages):
+                       end_page = min(start_page + max_pages, page_count)
+                       chunk_num += 1
+                       chunk_filename = f"{base_name}__part{chunk_num:03d}.pdf"
+                       chunk_path = os.path.join(tmp_dir, chunk_filename)
+                       # Create chunk
+                       writer = pypdf.PdfWriter()
+                       for page_num in range(start_page, end_page):
+                           writer.add_page(reader.pages[page_num])
+                       with open(chunk_path, 'wb') as f:
+                           writer.write(f)
+                       # Upload chunk
+                       session.file.put(chunk_path, f"@{processed_stage}", auto_compress=False, overwrite=True)
+           except Exception as e:
+               # Can't parse PDF: copy as-is
+               session.file.put(local_file, f"@{processed_stage}", auto_compress=False, overwrite=True)
+           files_processed += 1
+       except Exception as e:
+           # Skip files that fail
+           continue
+   # Refresh processed stage
+   if files_processed > 0:
+       session.sql("ALTER STAGE AUTOMATION_TESTING_PROCESSED REFRESH").collect()
+       # Run Document AI on new files
+       session.sql("""
+           INSERT INTO AUTOMATION_TESTING_RAW
+           SELECT
+               RELATIVE_PATH,
+               SIZE,
+               LAST_MODIFIED::TIMESTAMP_LTZ,
+               FILE_URL,
+               DOC_AI_DB.DOC_AI_SCHEMA.DAEN_DATA_EQUITY!PREDICT(
+                   GET_PRESIGNED_URL('@AUTOMATION_TESTING_PROCESSED', RELATIVE_PATH), 1
+               ),
+               CURRENT_TIMESTAMP()
+           FROM DIRECTORY('@AUTOMATION_TESTING_PROCESSED')
+           WHERE LOWER(RELATIVE_PATH) LIKE '%.pdf'
+             AND RELATIVE_PATH NOT IN (SELECT file_name FROM AUTOMATION_TESTING_RAW)
+       """).collect()
+       # Rebuild final table
+       session.sql("""
+           CREATE OR REPLACE TABLE AUTOMATION_TESTING_FINAL AS
+           WITH flat AS (
+               SELECT
+                   file_name,
+                   REGEXP_REPLACE(SPLIT_PART(file_name, '/', -1),'__part[0-9]{3}','') AS doc_id,
+                   json:__documentMetadata.ocrScore::FLOAT AS ocrScore,
+                   json:AGREEMENT_FOR[0]:value::STRING AS agreement_for,
+                   json:AGREEMENT_FOR[0]:score::FLOAT AS agreement_for_score,
+                   json:CONTRACTOR[0]:value::STRING AS contractor,
+                   json:CONTRACTOR[0]:score::FLOAT AS contractor_score,
+                   json:SIGNING_DATE[0]:value::STRING AS signing_date,
+                   json:SIGNING_DATE[0]:score::FLOAT AS signing_date_score,
+                   json:OFFICIAL_CA[0]:value::STRING AS official_ca,
+                   json:OFFICIAL_CA[0]:score::FLOAT AS official_ca_score,
+                   json:OFFICIAL_CONTRACTOR[0]:value::STRING AS official_contractor,
+                   json:OFFICIAL_CONTRACTOR[0]:score::FLOAT AS official_contractor_score,
+                   json:RFP_NUMBER[0]:value::STRING AS rfp_number,
+                   json:RFP_NUMBER[0]:score::FLOAT AS rfp_number_score,
+                   json:RFP_PUBLISHED_DATE[0]:value::STRING AS rfp_published_date,
+                   json:RFP_PUBLISHED_DATE[0]:score::FLOAT AS rfp_published_date_score,
+                   json:PROPOSALS_RECEIVED[0]:value::STRING AS proposals_received,
+                   json:PROPOSALS_RECEIVED[0]:score::FLOAT AS proposals_received_score,
+                   json:PROPOSAL_SUBMISSION_DATE[0]:value::STRING AS proposal_submission_date,
+                   json:PROPOSAL_SUBMISSION_DATE[0]:score::FLOAT AS proposal_submission_date_score,
+                   json:CONTRACT_TYPE[0]:value::STRING AS contract_type,
+                   json:CONTRACT_TYPE[0]:score::FLOAT AS contract_type_score,
+                   json:CONTRACTING_AGENCY[0]:value::STRING AS contracting_agency,
+                   json:CONTRACTING_AGENCY[0]:score::FLOAT AS contracting_agency_score,
+                   json:MAXIMUM_AMOUNT[0]:value::STRING AS maximum_amount,
+                   json:MAXIMUM_AMOUNT[0]:score::FLOAT AS maximum_amount_score,
+                   json:TASK[0]:value::STRING AS task,
+                   json:TASK[0]:score::FLOAT AS task_score,
+                   json:CONTRACT_NUMBER[0]:value::STRING AS contract_number,
+                   json:CONTRACT_NUMBER[0]:score::FLOAT AS contract_number_score
+               FROM AUTOMATION_TESTING_RAW
+           )
+           SELECT
+               doc_id AS file_name,
+               MAX(ocrScore) AS ocrScore,
+               MAX_BY(agreement_for, agreement_for_score) AS agreement_for,
+               MAX(agreement_for_score) AS agreement_for_score,
+               MAX_BY(contractor, contractor_score) AS contractor,
+               MAX(contractor_score) AS contractor_score,
+               MAX_BY(signing_date, signing_date_score) AS signing_date,
+               MAX(signing_date_score) AS signing_date_score,
+               MAX_BY(official_ca, official_ca_score) AS official_ca,
+               MAX(official_ca_score) AS official_ca_score,
+               MAX_BY(official_contractor, official_contractor_score) AS official_contractor,
+               MAX(official_contractor_score) AS official_contractor_score,
+               MAX_BY(rfp_number, rfp_number_score) AS rfp_number,
+               MAX(rfp_number_score) AS rfp_number_score,
+               MAX_BY(rfp_published_date, rfp_published_date_score) AS rfp_published_date,
+               MAX(rfp_published_date_score) AS rfp_published_date_score,
+               MAX_BY(proposals_received, proposals_received_score) AS proposals_received,
+               MAX(proposals_received_score) AS proposals_received_score,
+               MAX_BY(proposal_submission_date, proposal_submission_date_score) AS proposal_submission_date,
+               MAX(proposal_submission_date_score) AS proposal_submission_date_score,
+               MAX_BY(contract_type, contract_type_score) AS contract_type,
+               MAX(contract_type_score) AS contract_type_score,
+               MAX_BY(contracting_agency, contracting_agency_score) AS contracting_agency,
+               MAX(contracting_agency_score) AS contracting_agency_score,
+               MAX_BY(maximum_amount, maximum_amount_score) AS maximum_amount,
+               MAX(maximum_amount_score) AS maximum_amount_score,
+               MAX_BY(task, task_score) AS task,
+               MAX(task_score) AS task_score,
+               MAX_BY(contract_number, contract_number_score) AS contract_number,
+               MAX(contract_number_score) AS contract_number_score
+           FROM flat
+           GROUP BY doc_id
+       """).collect()
+   return f"Successfully processed {files_processed} new files"
+$$;
+
